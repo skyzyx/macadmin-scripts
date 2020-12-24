@@ -1,0 +1,3 @@
+* text=auto
+*.md eol=lf diff=markdown
+*.py eol=lf diff=python

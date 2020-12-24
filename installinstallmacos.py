@@ -1,7 +1,8 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # encoding: utf-8
 #
 # Copyright 2017 Greg Neagle.
+# Copyright 2020 Ryan Parman <ryan@ryanparman.com>.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,13 +19,13 @@
 # Thanks to Tim Sutton for ideas, suggestions, and sample code.
 #
 
-"""installinstallmacos.py
-A tool to download the parts for an Install macOS app from Apple's
-softwareupdate servers and install a functioning Install macOS app onto an
-empty disk image"""
+'''
+installinstallmacos.py
 
-# Python 3 compatibility shims
-from __future__ import absolute_import, division, print_function, unicode_literals
+A tool to download the parts for an "Install macOS" app from Apple's
+`softwareupdate` servers and install a functioning "Install macOS" app onto an
+empty disk image.
+'''
 
 import argparse
 import gzip
@@ -34,94 +35,93 @@ import shutil
 import subprocess
 import sys
 import xattr
-
-try:
-    # python 2
-    from urllib.parse import urlsplit
-except ImportError:
-    # python 3
-    from urlparse import urlsplit
+from urllib.parse import urlparse, urlsplit
 from xml.dom import minidom
 from xml.parsers.expat import ExpatError
 from distutils.version import LooseVersion
 
-
 DEFAULT_SUCATALOGS = {
-    "17": "https://swscan.apple.com/content/catalogs/others/"
-    "index-10.13-10.12-10.11-10.10-10.9"
-    "-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog",
-    "18": "https://swscan.apple.com/content/catalogs/others/"
-    "index-10.14-10.13-10.12-10.11-10.10-10.9"
-    "-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog",
-    "19": "https://swscan.apple.com/content/catalogs/others/"
-    "index-10.15-10.14-10.13-10.12-10.11-10.10-10.9"
-    "-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog",
-    "20": "https://swscan.apple.com/content/catalogs/others/"
-    "index-10.16-10.15-10.14-10.13-10.12-10.11-10.10-10.9"
-    "-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog",
+    '17':
+        'https://swscan.apple.com/content/catalogs/others/index-10.13-10.12-10.11-10.10-10.9-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog',
+    '18':
+        'https://swscan.apple.com/content/catalogs/others/index-10.14-10.13-10.12-10.11-10.10-10.9-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog',
+    '19':
+        'https://swscan.apple.com/content/catalogs/others/index-10.15-10.14-10.13-10.12-10.11-10.10-10.9-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog',
+    '20':
+        'https://swscan.apple.com/content/catalogs/others/index-11-10.15-10.14-10.13-10.12-10.11-10.10-10.9-mountainlion-lion-snowleopard-leopard.merged-1.sucatalog',
 }
 
 SEED_CATALOGS_PLIST = (
-    "/System/Library/PrivateFrameworks/Seeding.framework/Versions/Current/"
-    "Resources/SeedCatalogs.plist"
+    '/System/Library/PrivateFrameworks/Seeding.framework/Versions/Current/Resources/SeedCatalogs.plist'
 )
 
+HDIUTIL = '/usr/bin/hdiutil'
+ERROR_TEXT = "Error reading %s: %s"
+NO_REPLICATION_TEXT = "Could not replicate %s: %s"
 
 def get_device_id():
     """Gets the local device ID on Apple Silicon Macs or the board_id of older Macs"""
     ioreg_cmd = ["/usr/sbin/ioreg", "-c", "IOPlatformExpertDevice", "-d", "2"]
+
     try:
         ioreg_output = subprocess.check_output(ioreg_cmd).splitlines()
         board_id = ""
         device_id = ""
+
         for line in ioreg_output:
             line_decoded = line.decode("utf8")
+
             if "board-id" in line_decoded:
                 board_id = line_decoded.split("<")[-1]
-                board_id = board_id[
-                    board_id.find('<"') + 2 : board_id.find('">')  # noqa: E203
-                ]
+                board_id = board_id[board_id.find('<"') + 2:board_id.find('">') # noqa: E203
+                                    ]
             elif "compatible" in line_decoded:
                 device_details = line_decoded.split("<")[-1]
-                device_details = device_details[
-                    device_details.find("<")
-                    + 2 : device_details.find(">")  # noqa: E203
-                ]
+                device_details = device_details[device_details.find("<")
+                                                + 2:device_details.find(">") # noqa: E203
+                                                ]
                 device_id = (
                     device_details.replace('","', ";").replace('"', "").split(";")[0]
                 )
+
         if board_id:
             device_id = ""
+
         return board_id, device_id
+
     except subprocess.CalledProcessError as err:
         raise ReplicationError(err)
-
 
 def is_a_vm():
     """Determines if the script is being run in a virtual machine"""
     sysctl_cmd = ["/usr/sbin/sysctl", "-n", "machdep.cpu.features"]
+
     try:
         sysctl_output = subprocess.check_output(sysctl_cmd)
         cpu_features = sysctl_output.decode("utf8").split(" ")
         is_vm = False
+
         for i in range(len(cpu_features)):
             if cpu_features[i] == "VMM":
                 is_vm = True
+
     except subprocess.CalledProcessError as err:
         raise ReplicationError(err)
-    return is_vm
 
+    return is_vm
 
 def get_hw_model():
     """Gets the local system ModelIdentifier"""
     sysctl_cmd = ["/usr/sbin/sysctl", "-n", "hw.model"]
+
     try:
         sysctl_output = subprocess.check_output(sysctl_cmd)
         hw_model = sysctl_output.decode("utf8")
+
     except subprocess.CalledProcessError as err:
         raise ReplicationError(err)
-    return hw_model
 
+    return hw_model
 
 def get_bridge_id():
     """Gets the local system DeviceID for T2 Macs - note only works on 10.13+"""
@@ -132,32 +132,39 @@ def get_bridge_id():
             "localbridge",
             "HWModel",
         ]
+
         try:
             remotectl_output = subprocess.check_output(
                 remotectl_cmd, stderr=subprocess.STDOUT
             )
             bridge_id = remotectl_output.decode("utf8").split(" ")[-1].split("\n")[0]
+
         except subprocess.CalledProcessError:
             return None
-        return bridge_id
 
+        return bridge_id
 
 def get_current_build_info():
     """Gets the local system build"""
     build_info = []
     sw_vers_cmd = ["/usr/bin/sw_vers"]
+
     try:
         sw_vers_output = subprocess.check_output(sw_vers_cmd).splitlines()
+
         for line in sw_vers_output:
             line_decoded = line.decode("utf8")
+
             if "ProductVersion" in line_decoded:
                 build_info.insert(0, line_decoded.split("\t")[-1])
+
             if "BuildVersion" in line_decoded:
                 build_info.insert(1, line_decoded.split("\t")[-1])
+
     except subprocess.CalledProcessError as err:
         raise ReplicationError(err)
-    return build_info
 
+    return build_info
 
 def get_input(prompt=None):
     """Python 2 and 3 wrapper for raw_input/input"""
@@ -166,7 +173,6 @@ def get_input(prompt=None):
     except NameError:
         # raw_input doesn't exist in Python 3
         return input(prompt)
-
 
 def read_plist(filepath):
     """Wrapper for the differences between Python 2 and Python 3's plistlib"""
@@ -177,15 +183,13 @@ def read_plist(filepath):
         # plistlib module doesn't have a load function (as in Python 2)
         return plistlib.readPlist(filepath)
 
-
 def read_plist_from_string(bytestring):
     """Wrapper for the differences between Python 2 and Python 3's plistlib"""
     try:
         return plistlib.loads(bytestring)
     except AttributeError:
         # plistlib module doesn't have a load function (as in Python 2)
-        return plistlib.readPlistFromString(bytestring)  # pylint: disable=no-member
-
+        return plistlib.readPlistFromString(bytestring) # pylint: disable=no-member
 
 def write_plist(plist_object, filepath):
     """Wrapper for the differences between Python 2 and Python 3's plistlib"""
@@ -196,45 +200,45 @@ def write_plist(plist_object, filepath):
         # plistlib module doesn't have a load function (as in Python 2)
         return plistlib.writePlist(plist_object, filepath)
 
-
 def get_seeding_program(sucatalog_url):
     """Returns a seeding program name based on the sucatalog_url"""
     try:
         seed_catalogs = read_plist(SEED_CATALOGS_PLIST)
+
         for key, value in seed_catalogs.items():
             if sucatalog_url == value:
                 return key
+
         return ""
+
     except (OSError, IOError, ExpatError, AttributeError, KeyError) as err:
         print(err, file=sys.stderr)
         return ""
 
-
-def get_seed_catalog(seedname="DeveloperSeed"):
+def get_seed_catalog(seedname="PublicSeed"):
     """Returns the developer seed sucatalog"""
     try:
         seed_catalogs = read_plist(SEED_CATALOGS_PLIST)
         return seed_catalogs.get(seedname)
+
     except (OSError, IOError, ExpatError, AttributeError, KeyError) as err:
         print(err, file=sys.stderr)
         return ""
-
 
 def get_seeding_programs():
     """Returns the list of seeding program names"""
     try:
         seed_catalogs = read_plist(SEED_CATALOGS_PLIST)
         return list(seed_catalogs.keys())
+
     except (OSError, IOError, ExpatError, AttributeError, KeyError) as err:
         print(err, file=sys.stderr)
         return ""
-
 
 def get_default_catalog():
     """Returns the default softwareupdate catalog for the current OS"""
     darwin_major = os.uname()[2].split(".")[0]
     return DEFAULT_SUCATALOGS.get(darwin_major)
-
 
 def make_sparse_image(volume_name, output_path):
     """Make a sparse disk image we can install a product to"""
@@ -252,21 +256,25 @@ def make_sparse_image(volume_name, output_path):
         "-plist",
         output_path,
     ]
+
     try:
         output = subprocess.check_output(cmd)
+
     except subprocess.CalledProcessError as err:
         print(err, file=sys.stderr)
         exit(-1)
+
     try:
         return read_plist_from_string(output)[0]
+
     except IndexError:
         print("Unexpected output from hdiutil: %s" % output, file=sys.stderr)
         exit(-1)
+
     except ExpatError as err:
         print("Malformed output from hdiutil: %s" % output, file=sys.stderr)
         print(err, file=sys.stderr)
         exit(-1)
-
 
 def make_compressed_dmg(app_path, diskimagepath, volume_name):
     """Returns path to newly-created compressed r/o disk image containing
@@ -277,7 +285,7 @@ def make_compressed_dmg(app_path, diskimagepath, volume_name):
         % os.path.basename(app_path)
     )
     cmd = [
-        "/usr/bin/hdiutil",
+        HDIUTIL,
         "create",
         "-fs",
         "HFS+",
@@ -285,13 +293,15 @@ def make_compressed_dmg(app_path, diskimagepath, volume_name):
         app_path,
         diskimagepath,
     ]
+
     try:
         subprocess.check_call(cmd)
+
     except subprocess.CalledProcessError as err:
         print(err, file=sys.stderr)
+
     else:
         print("Disk image created at: %s" % diskimagepath)
-
 
 def mountdmg(dmgpath):
     """
@@ -300,7 +310,7 @@ def mountdmg(dmgpath):
     mountpoints = []
     dmgname = os.path.basename(dmgpath)
     cmd = [
-        "/usr/bin/hdiutil",
+        HDIUTIL,
         "attach",
         dmgpath,
         "-mountRandom",
@@ -310,13 +320,16 @@ def mountdmg(dmgpath):
         "-owners",
         "on",
     ]
+
     proc = subprocess.Popen(
         cmd, bufsize=-1, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
     (pliststr, err) = proc.communicate()
+
     if proc.returncode:
         print('Error: "%s" while mounting %s.' % (err, dmgname), file=sys.stderr)
         return None
+
     if pliststr:
         plist = read_plist_from_string(pliststr)
         for entity in plist["system-entities"]:
@@ -325,26 +338,27 @@ def mountdmg(dmgpath):
 
     return mountpoints[0]
 
-
 def unmountdmg(mountpoint):
     """
     Unmounts the dmg at mountpoint
     """
     proc = subprocess.Popen(
-        ["/usr/bin/hdiutil", "detach", mountpoint],
+        [HDIUTIL, "detach", mountpoint],
         bufsize=-1,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     (dummy_output, err) = proc.communicate()
+
     if proc.returncode:
         print("Polite unmount failed: %s" % err, file=sys.stderr)
         print("Attempting to force unmount %s" % mountpoint, file=sys.stderr)
+
         # try forcing the unmount
-        retcode = subprocess.call(["/usr/bin/hdiutil", "detach", mountpoint, "-force"])
+        retcode = subprocess.call([HDIUTIL, "detach", mountpoint, "-force"])
+
         if retcode:
             print("Failed to unmount %s" % mountpoint, file=sys.stderr)
-
 
 def install_product(dist_path, target_vol):
     """Install a product to a target volume.
@@ -353,15 +367,19 @@ def install_product(dist_path, target_vol):
     # when installing packages (for machine-specific OS builds)
     os.environ["CM_BUILD"] = "CM_BUILD"
     cmd = ["/usr/sbin/installer", "-pkg", dist_path, "-target", target_vol]
+
     try:
         subprocess.check_call(cmd)
+
     except subprocess.CalledProcessError as err:
         print(err, file=sys.stderr)
         return False
+
     else:
         # Apple postinstall script bug ends up copying files to a path like
         # /tmp/dmg.T9ak1HApplications
         path = target_vol + "Applications"
+
         if os.path.exists(path):
             print("*********************************************************")
             print("*** Working around a very dumb Apple bug in a package ***")
@@ -370,25 +388,25 @@ def install_product(dist_path, target_vol):
             print("*** other than the current boot volume.               ***")
             print("***       Please file feedback with Apple!            ***")
             print("*********************************************************")
-            subprocess.check_call(
-                ["/usr/bin/ditto", path, os.path.join(target_vol, "Applications")]
-            )
+            subprocess.check_call([
+                "/usr/bin/ditto", path, os.path.join(target_vol, "Applications")
+            ])
             subprocess.check_call(["/bin/rm", "-r", path])
+
         return True
 
-
 class ReplicationError(Exception):
+
     """A custom error when replication fails"""
 
     pass
-
 
 def replicate_url(
     full_url,
     root_dir="/tmp",
     show_progress=False,
     ignore_cache=False,
-    attempt_resume=False,
+    attempt_resume=False
 ):
     """Downloads a URL and stores it in the same relative path on our
     filesystem. Returns a path to the replicated file."""
@@ -397,65 +415,79 @@ def replicate_url(
     relative_url = path.lstrip("/")
     relative_url = os.path.normpath(relative_url)
     local_file_path = os.path.join(root_dir, relative_url)
+
     if show_progress:
         options = "-fL"
+
     else:
         options = "-sfL"
+
     curl_cmd = ["/usr/bin/curl", options, "--create-dirs", "-o", local_file_path]
+
     if not full_url.endswith(".gz"):
         # stupid hack for stupid Apple behavior where it sometimes returns
         # compressed files even when not asked for
         curl_cmd.append("--compressed")
+
     if not ignore_cache and os.path.exists(local_file_path):
         curl_cmd.extend(["-z", local_file_path])
+
         if attempt_resume:
             curl_cmd.extend(["-C", "-"])
+
     curl_cmd.append(full_url)
+
     # print("Downloading %s..." % full_url)
     try:
         subprocess.check_call(curl_cmd)
+
     except subprocess.CalledProcessError as err:
         raise ReplicationError(err)
-    return local_file_path
 
+    return local_file_path
 
 def parse_server_metadata(filename):
     """Parses a softwareupdate server metadata file, looking for information
-    of interest.
-    Returns a dictionary containing title, version, and description."""
+    of interest. Returns a dictionary containing title, version, and description."""
     title = ""
     vers = ""
+
     try:
         md_plist = read_plist(filename)
+
     except (OSError, IOError, ExpatError) as err:
-        print("Error reading %s: %s" % (filename, err), file=sys.stderr)
+        print(ERROR_TEXT.format(filename, err), file=sys.stderr)
         return {}
+
     vers = md_plist.get("CFBundleShortVersionString", "")
     localization = md_plist.get("localization", {})
     preferred_localization = localization.get("English") or localization.get("en")
+
     if preferred_localization:
         title = preferred_localization.get("title", "")
 
     metadata = {}
     metadata["title"] = title
     metadata["version"] = vers
-    return metadata
 
+    return metadata
 
 def get_server_metadata(catalog, product_key, workdir, ignore_cache=False):
     """Replicate ServerMetaData"""
     try:
         url = catalog["Products"][product_key]["ServerMetadataURL"]
+
         try:
             smd_path = replicate_url(url, root_dir=workdir, ignore_cache=ignore_cache)
             return smd_path
+
         except ReplicationError as err:
-            print("Could not replicate %s: %s" % (url, err), file=sys.stderr)
+            print(NO_REPLICATION_TEXT.format(url, err), file=sys.stderr)
             return None
+
     except KeyError:
         # print("No metadata for %s.\n" % product_key, file=sys.stderr)
         return None
-
 
 def parse_dist(filename):
     """Parses a softwareupdate dist file, returning a dict of info of
@@ -467,7 +499,7 @@ def parse_dist(filename):
         print("Invalid XML in %s" % filename, file=sys.stderr)
         return dist_info
     except IOError as err:
-        print("Error reading %s: %s" % (filename, err), file=sys.stderr)
+        print(ERROR_TEXT.format(filename, err), file=sys.stderr)
         return dist_info
 
     titles = dom.getElementsByTagName("title")
@@ -484,9 +516,7 @@ def parse_dist(filename):
     # handle the possibility that keys from auxinfo may be nested
     # within a 'dict' element
     dict_nodes = [
-        n
-        for n in auxinfo.childNodes
-        if n.nodeType == n.ELEMENT_NODE and n.tagName == "dict"
+        n for n in auxinfo.childNodes if n.nodeType == n.ELEMENT_NODE and n.tagName == "dict"
     ]
     if dict_nodes:
         children = dict_nodes[0].childNodes
@@ -501,7 +531,6 @@ def parse_dist(filename):
             value = None
     return dist_info
 
-
 def get_board_ids(filename):
     """Parses a softwareupdate dist file, returning a list of supported
     Board IDs"""
@@ -510,7 +539,7 @@ def get_board_ids(filename):
         for line in search:
             if type(line) == bytes:
                 line = line.decode("utf8")
-            line = line.rstrip()  # remove '\n' at end of line
+            line = line.rstrip() # remove '\n' at end of line
             # dist files for macOS 10.* list boardIDs whereas dist files for
             # macOS 11.* list supportedBoardIDs
             if "boardIds" in line:
@@ -518,7 +547,6 @@ def get_board_ids(filename):
             elif "supportedBoardIDs" in line:
                 supported_board_ids = line.replace("var supportedBoardIDs = ", "")
                 return supported_board_ids
-
 
 def get_device_ids(filename):
     """Parses a softwareupdate dist file, returning a list of supported
@@ -529,11 +557,10 @@ def get_device_ids(filename):
         for line in search:
             if type(line) == bytes:
                 line = line.decode("utf8")
-            line = line.rstrip()  # remove '\n' at end of line
+            line = line.rstrip() # remove '\n' at end of line
             if "supportedDeviceIDs" in line:
                 supported_device_ids = line.replace("var supportedDeviceIDs = ", "")
                 return supported_device_ids
-
 
 def get_unsupported_models(filename):
     """Parses a softwareupdate dist file, returning a list of non-supported
@@ -543,11 +570,10 @@ def get_unsupported_models(filename):
         for line in search:
             if type(line) == bytes:
                 line = line.decode("utf8")
-            line = line.rstrip()  # remove '\n' at end of line
+            line = line.rstrip() # remove '\n' at end of line
             if "nonSupportedModels" in line:
                 unsupported_models = line.lstrip("var nonSupportedModels = ")
                 return unsupported_models
-
 
 def download_and_parse_sucatalog(sucatalog, workdir, ignore_cache=False):
     """Downloads and returns a parsed softwareupdate catalog"""
@@ -556,7 +582,7 @@ def download_and_parse_sucatalog(sucatalog, workdir, ignore_cache=False):
             sucatalog, root_dir=workdir, ignore_cache=ignore_cache
         )
     except ReplicationError as err:
-        print("Could not replicate %s: %s" % (sucatalog, err), file=sys.stderr)
+        print(NO_REPLICATION_TEXT.format(sucatalog, err), file=sys.stderr)
         exit(-1)
     if os.path.splitext(localcatalogpath)[1] == ".gz":
         with gzip.open(localcatalogpath) as the_file:
@@ -565,16 +591,15 @@ def download_and_parse_sucatalog(sucatalog, workdir, ignore_cache=False):
                 catalog = read_plist_from_string(content)
                 return catalog
             except ExpatError as err:
-                print("Error reading %s: %s" % (localcatalogpath, err), file=sys.stderr)
+                print(ERROR_TEXT.format(localcatalogpath, err), file=sys.stderr)
                 exit(-1)
     else:
         try:
             catalog = read_plist(localcatalogpath)
             return catalog
         except (OSError, IOError, ExpatError) as err:
-            print("Error reading %s: %s" % (localcatalogpath, err), file=sys.stderr)
+            print(ERROR_TEXT.format(localcatalogpath, err), file=sys.stderr)
             exit(-1)
-
 
 def find_mac_os_installers(catalog, installassistant_pkg_only=False):
     """Return a list of product identifiers for what appear to be macOS
@@ -586,22 +611,17 @@ def find_mac_os_installers(catalog, installassistant_pkg_only=False):
             # account for args.pkg
             if installassistant_pkg_only:
                 try:
-                    if product["ExtendedMetaInfo"][
-                        "InstallAssistantPackageIdentifiers"
-                    ]["SharedSupport"]:
+                    if product["ExtendedMetaInfo"]["InstallAssistantPackageIdentifiers"]["SharedSupport"]:
                         mac_os_installer_products.append(product_key)
                 except KeyError:
                     continue
             else:
                 try:
-                    if product["ExtendedMetaInfo"][
-                        "InstallAssistantPackageIdentifiers"
-                    ]:
+                    if product["ExtendedMetaInfo"]["InstallAssistantPackageIdentifiers"]:
                         mac_os_installer_products.append(product_key)
                 except KeyError:
                     continue
     return mac_os_installer_products
-
 
 def os_installer_product_info(
     catalog, workdir, installassistant_pkg_only, ignore_cache=False
@@ -630,7 +650,7 @@ def os_installer_product_info(
                 dist_url, root_dir=workdir, ignore_cache=ignore_cache
             )
         except ReplicationError as err:
-            print("Could not replicate %s: %s" % (dist_url, err), file=sys.stderr)
+            print(NO_REPLICATION_TEXT.format(dist_url, err), file=sys.stderr)
         else:
             dist_info = parse_dist(dist_path)
             product_info[product_key]["DistributionPath"] = dist_path
@@ -648,14 +668,12 @@ def os_installer_product_info(
 
     return product_info
 
-
 def get_latest_version(current_item, latest_item):
     """Compares versions between two values and returns the latest (highest) value"""
     if LooseVersion(current_item) > LooseVersion(latest_item):
         return current_item
     else:
         return latest_item
-
 
 def replicate_product(catalog, product_id, workdir, ignore_cache=False):
     """Downloads all the packages for a product"""
@@ -675,7 +693,7 @@ def replicate_product(catalog, product_id, workdir, ignore_cache=False):
                 )
             except ReplicationError as err:
                 print(
-                    "Could not replicate %s: %s" % (package["URL"], err),
+                    NO_REPLICATION_TEXT.format(package["URL"], err),
                     file=sys.stderr,
                 )
                 exit(-1)
@@ -686,11 +704,10 @@ def replicate_product(catalog, product_id, workdir, ignore_cache=False):
                 )
             except ReplicationError as err:
                 print(
-                    "Could not replicate %s: %s" % (package["MetadataURL"], err),
+                    NO_REPLICATION_TEXT.format(package["MetadataURL"], err),
                     file=sys.stderr,
                 )
                 exit(-1)
-
 
 def find_installer_app(mountpoint):
     """Returns the path to the Install macOS app on the mountpoint"""
@@ -699,7 +716,6 @@ def find_installer_app(mountpoint):
         if item.endswith(".app"):
             return os.path.join(applications_dir, item)
     return None
-
 
 def main():
     """Do the main thing here"""
@@ -761,17 +777,20 @@ def main():
         "--build",
         metavar="build_version",
         default="",
-        help="Specify a specific build to search for and " "download.",
+        help="Specify a specific build to search for and "
+        "download.",
     )
     parser.add_argument(
         "--list",
         action="store_true",
-        help="Output the available updates to a plist " "and quit.",
+        help="Output the available updates to a plist "
+        "and quit.",
     )
     parser.add_argument(
         "--current",
         action="store_true",
-        help="Automatically select the current installed " "build.",
+        help="Automatically select the current installed "
+        "build.",
     )
     parser.add_argument(
         "--renew",
@@ -784,7 +803,8 @@ def main():
         "--newer_than_version",
         metavar="newer_than_version",
         default="",
-        help="Specify a minimum version to check for newer " "versions to download.",
+        help="Specify a minimum version to check for newer "
+        "versions to download.",
     )
     parser.add_argument(
         "--validate",
@@ -799,7 +819,9 @@ def main():
         "for the current device.",
     )
     parser.add_argument(
-        "--warnings", action="store_true", help="Show warnings in the listed output",
+        "--warnings",
+        action="store_true",
+        help="Show warnings in the listed output",
     )
     parser.add_argument(
         "--beta",
@@ -912,8 +934,8 @@ def main():
     if args.warnings:
         validity_header = "Notes/Warnings"
     print(
-        "%2s  %-15s %-10s %-8s %-11s %-30s %s"
-        % ("#", "ProductID", "Version", "Build", "Post Date", "Title", validity_header)
+        "%2s  %-15s %-10s %-8s %-11s %-30s %s" %
+        ("#", "ProductID", "Version", "Build", "Post Date", "Title", validity_header)
     )
     # this is where we do checks for validity based on model type and version
     for index, product_id in enumerate(product_info):
@@ -938,10 +960,7 @@ def main():
             # if we don't have any of those matches, then we can't do a comparison
             else:
                 not_valid = "No supported model data"
-        if (
-            get_latest_version(build_info[0], product_info[product_id]["version"])
-            != product_info[product_id]["version"]
-        ):
+        if (get_latest_version(build_info[0], product_info[product_id]["version"]) != product_info[product_id]["version"]):
             not_valid = "Unsupported macOS version"
         else:
             valid_build_found = True
@@ -951,8 +970,7 @@ def main():
             validity_info = not_valid
 
         print(
-            "%2s  %-15s %-10s %-8s %-11s %-30s %s"
-            % (
+            "%2s  %-15s %-10s %-8s %-11s %-30s %s" % (
                 index + 1,
                 product_id,
                 product_info[product_id].get("version", "UNKNOWN"),
@@ -967,11 +985,8 @@ def main():
 
         # skip if build is not suitable for current device
         # and a validation parameter was chosen
-        if not_valid and (
-            args.validate
-            or (args.auto or args.version or args.os)
-            # and not args.beta  # not needed now we have DeviceID check
-        ):
+        if not_valid and (args.validate or (args.auto or args.version or args.os) # and not args.beta  # not needed now we have DeviceID check
+                          ):
             continue
 
         # skip if a version is selected and it does not match
@@ -986,7 +1001,7 @@ def main():
                     major = product_info[product_id]["version"].split(".", 2)[:2]
                     os_version = ".".join(major)
             except ValueError:
-                #  Account for when no version information is given
+                #  Account for when no version information is given
                 os_version = ""
             if args.os != os_version:
                 continue
@@ -1000,7 +1015,7 @@ def main():
                 except NameError:
                     latest_valid_build = product_info[product_id]["BUILD"]
                     # if using newer-than option, skip if not newer than the version
-                    #  we are checking against
+                    #  we are checking against
                     if args.newer_than_version:
                         latest_valid_build = get_latest_version(
                             product_info[product_id]["version"], args.newer_than_version
@@ -1008,10 +1023,7 @@ def main():
                         if latest_valid_build == args.newer_than_version:
                             continue
                     # if using renew option, skip if the same as the current version
-                    if (
-                        args.renew
-                        and build_info[0] == product_info[product_id]["version"]
-                    ):
+                    if (args.renew and build_info[0] == product_info[product_id]["version"]):
                         continue
                     answer = index + 1
                 else:
@@ -1020,7 +1032,7 @@ def main():
                     )
                     if latest_valid_build == product_info[product_id]["BUILD"]:
                         # if using newer-than option, skip if not newer than the version
-                        #  we are checking against
+                        #  we are checking against
                         if args.newer_than_version:
                             latest_valid_build = get_latest_version(
                                 product_info[product_id]["version"],
@@ -1029,10 +1041,7 @@ def main():
                             if latest_valid_build == args.newer_than_version:
                                 continue
                         # if using renew option, skip if the same as the current version
-                        if (
-                            args.renew
-                            and build_info[1] == product_info[product_id]["BUILD"]
-                        ):
+                        if (args.renew and build_info[1] == product_info[product_id]["BUILD"]):
                             continue
                         answer = index + 1
 
@@ -1059,21 +1068,13 @@ def main():
                 break
 
     # Stop here if no valid builds found
-    if (
-        valid_build_found is False
-        and not args.build
-        and not args.current
-        and not args.validate
-        and not args.list
-    ):
+    if (valid_build_found is False and not args.build and not args.current and not args.validate and not args.list):
         print("No valid build found for this hardware")
         exit(0)
 
     # clear content directory in workdir if requested
     if args.clear:
-        print(
-            "Removing existing content from working directory '%s'...\n" % args.workdir
-        )
+        print("Removing existing content from working directory '%s'...\n" % args.workdir)
         shutil.rmtree("%s/content" % args.workdir)
 
     # Output a plist of available updates and quit if list option chosen
@@ -1096,9 +1097,7 @@ def main():
             )
             exit(0)
         else:
-            print(
-                "\n" "Build %s available. Downloading #%s...\n" % (args.build, answer)
-            )
+            print("\n" "Build %s available. Downloading #%s...\n" % (args.build, answer))
     elif args.current:
         try:
             answer
@@ -1197,9 +1196,7 @@ def main():
             )
     else:
         # default option to interactively offer selection
-        answer = get_input(
-            "\nChoose a product to download (1-%s): " % len(product_info)
-        )
+        answer = get_input("\nChoose a product to download (1-%s): " % len(product_info))
 
     try:
         index = int(answer) - 1
@@ -1210,8 +1207,8 @@ def main():
         print("Exiting.")
         exit(0)
 
-    #  shortened workflow if we just want a macOS Big Sur+ package
-    #  taken from @scriptingosx's Fetch-Installer-Pkg project
+    #  shortened workflow if we just want a macOS Big Sur+ package
+    #  taken from @scriptingosx's Fetch-Installer-Pkg project
     # (https://github.com/scriptingosx/fetch-installer-pkg)
     if args.pkg:
         product = catalog["Products"][product_id]
@@ -1271,12 +1268,9 @@ def main():
                 installer_app = find_installer_app(mountpoint)
                 if installer_app:
                     print(
-                        "Adding seeding program %s extended attribute to app"
-                        % seeding_program
+                        "Adding seeding program %s extended attribute to app" % seeding_program
                     )
-                    xattr.setxattr(
-                        installer_app, "SeedProgram", seeding_program.encode()
-                    )
+                    xattr.setxattr(installer_app, "SeedProgram", seeding_program.encode())
             print("Product downloaded and installed to %s" % sparse_diskimage_path)
             if args.raw:
                 unmountdmg(mountpoint)
@@ -1293,7 +1287,6 @@ def main():
                 unmountdmg(mountpoint)
                 # delete sparseimage since we don't need it any longer
                 os.unlink(sparse_diskimage_path)
-
 
 if __name__ == "__main__":
     main()
